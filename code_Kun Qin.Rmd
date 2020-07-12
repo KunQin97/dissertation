@@ -1,0 +1,274 @@
+---
+title: "Dissertation_code"
+author: "KUN QIN_s2005266"
+date: "2020/7/12"
+output: pdf_document
+---
+
+```{r}
+library(data.table)
+library(dplyr)
+library(maftools)
+library(readxl)
+```
+
+
+import data
+```{r}
+genie_data_mutations_extended <- read.delim("C:/Users/win10/Desktop/genie_data_mutations_extended.txt", header=FALSE)
+pre_tcga_mutations_data <- read.delim("C:/Users/win10/Desktop/pre_tcga_mutations_data.txt", header=FALSE)
+expected_mutability <- read_excel("C:/Users/win10/Desktop/expected_mutability.xlsx")
+```
+
+GENIE
+```{r}
+#tidy genie table and give column names
+colnames(genie_data_mutations_extended)=as.character(
+  genie_data_mutations_extended[1,])
+genie_data_mutations_extended=genie_data_mutations_extended[-1,]
+head(genie_data_mutations_extended)
+```
+
+
+create the subset  of GENIE to test
+```{r}
+#genie_data_mutations_extended=data.table(genie_data_mutations_extended)
+#filtered table with SNP and Missense mutation
+subgenie=genie_data_mutations_extended[which(genie_data_mutations_extended$Variant_Classification=="Missense_Mutation"&genie_data_mutations_extended$Variant_Type=="SNP")]
+
+#give subgenie a new column which is called name
+A=substr(subgenie$HGVSp_Short,3,nchar(subgenie$HGVSp_Short)-1)
+B=subgenie$Hugo_Symbol
+AB=paste(B,A,sep="_")
+subgenie$name=AB
+subgenie=subgenie%>%select(name,everything())
+
+#create a new table called newsub and it only includes the columns that we are interested
+newsub=subgenie[,.(name,Hugo_Symbol,Entrez_Gene_Id,NCBI_Build,Chromosome,Start_Position,End_Position,Variant_Classification,Variant_Type)]
+head(newsub)
+```
+
+import the background mutability and  then merge two tables
+```{r}
+#import the excel which included the background mutability called "expected mutability"
+expected_mutability=data.table(expected_mutability)
+expected_mutability=expected_mutability[,-1]
+
+#found some names in genie table but not included in expected mutability table
+setdiff(unique(newsub$name),unique(expected_mutability$name))
+
+#combine the two tables
+muttest=merge(newsub,expected_mutability,by.x = "name",by.y = "name",all=T)
+
+#creat the new table called “test” to do the binomial test
+name=data.table(table(muttest$name))
+test=merge(name,expected_mutability,by.x = "V1",by.y = "name")
+colnames(test)[1]="name"
+colnames(test)[2]="frequency"
+head(test)
+```
+
+test
+```{r}
+#test and get the corresponding p value
+n=nrow(newsub)
+e=NULL
+for (i in c(1:nrow(test))) {
+  pvalue=binom.test(as.numeric(test[i,2]),n,as.numeric(test[i,3]),"greater",conf.level = 0.95)$p.value
+  e=c(e,pvalue)
+}
+test$p_value=e
+
+#initial result
+test_genie=test
+test_genie$mutation_type="passenger"
+test_genie[which(test_genie$p_value<0.05)]$mutation_type="potential driver"
+#get the initial result ordered by p value
+test_genie_ordered=test_genie[order(test_genie$p_value)]
+test_genie_ordered
+#count the drivers
+table(test_genie_ordered$mutation_type)
+#look at the drivers
+test_genie[test_genie_ordered$mutation_type=="potential driver"]
+```
+
+FDR correction
+```{r}
+#use BH method to adjust every p value
+u=p.adjust(e,"BH")
+test$adjusted_p_value=u
+test$mutation_type="passenger"
+test[which(test$adjusted_p_value<0.05)]$mutation_type="potential driver"
+
+# get the result which is ordered by q value
+test_ordered=test[order(test$adjusted_p_value)]
+test_ordered
+#count the drivers
+table(test$mutation_type)
+#look at the drivers
+genie_driver=test[which(test$mutation_type=="potential driver")]
+genie_driver
+```
+
+
+compare p and q
+```{r}
+#compare the outcomes before correction and after correction
+x=c(test$p_value,test$adjusted_p_value)
+e=factor(rep(c("p_value","adjusted_p_value"), each=nrow(test)))
+data=data.frame(x,e)
+boxplot(x~e,data,col=c("2","3"))
+```
+
+
+TCGA
+```{r}
+#process TCGA as same as GENIE
+pre_tcga_mutations_data=data.table(pre_tcga_mutations_data)
+colnames(pre_tcga_mutations_data)=as.character(pre_tcga_mutations_data[1,])
+pre_tcga_mutations_data=pre_tcga_mutations_data[-1,]
+
+subtcga=pre_tcga_mutations_data[which(pre_tcga_mutations_data$Variant_Classification=="Missense_Mutation")]
+subtcga=subtcga[which(subtcga$Variant_Type=="SNP")]
+
+a=substr(subtcga$HGVSp_Short,3,nchar(subtcga$HGVSp_Short)-1)
+b=subtcga$Hugo_Symbol
+ab=paste(b,a,sep = "_")
+subtcga$name=ab
+subtcga=subtcga%>%select(name,everything())
+newsubtcga=subtcga[,c(1:10)]
+
+#found mutations in tcga table but not included in expected mutability table
+sum(table(setdiff(unique(newsubtcga$name),unique(expected_mutability$name))))
+
+#combine the two tables
+mte=merge(newsubtcga,expected_mutability,by.x = "name",by.y = "name")
+m=nrow(newsubtcga)
+
+#creat the new table called test_tcga to do the binomial test
+nametcga=data.table(table(mte$name))
+test_tcga=merge(nametcga,expected_mutability,by.x = "V1",by.y = "name")
+colnames(test_tcga)[1]="name"
+colnames(test_tcga)[2]="frequency"
+```
+
+test
+```{r}
+#test and get the corresponding p value
+c=NULL
+for (i in c(1:nrow(test_tcga))) {
+  pvalue=binom.test(as.numeric(test_tcga[i,2]),m,as.numeric(test_tcga[i,3]),"greater",conf.level = 0.95)$p.value
+  c=c(c,pvalue)
+}
+test_tcga$p_value=c
+```
+
+initial result
+```{r}
+tcga=test_tcga
+tcga$mutation_type="passenger"
+tcga[which(tcga$p_value<0.05)]$mutation_type="potential driver"
+#order result by p value and look at it
+tcga_ordered=tcga[order(tcga$p_value)]
+tcga_ordered
+#count drivers
+table(tcga$mutation_type)
+#look at drivers
+tcga_ordered[tcga_ordered$mutation_type=="potential driver"]
+
+```
+
+FDR correction
+```{r}
+#use BH method to adjust every p value
+v=p.adjust(c,"BH")
+test_tcga$adjusted_p_value=v
+test_tcga$mutation_type="passenger"
+test_tcga[which(test_tcga$adjusted_p_value<0.05)]$mutation_type="potential driver"
+#count drives
+table(test_tcga$mutation_type)
+#see results ordered by q value
+test_tcga_ordered=test_tcga[order(test_tcga$adjusted_p_value)]
+test_tcga_ordered
+#see drivers
+test_tcga_ordered[which(test_tcga_ordered$mutation_type=="potential driver")]
+```
+
+compare p and q
+```{r}
+X=c(test_tcga$p_value,test_tcga$adjusted_p_value)
+E=factor(rep(c("p_value","adjusted_p_value"), each=nrow(test_tcga)))
+Data=data.frame(X,E)
+boxplot(X~E,Data,col=c("1","2"))
+```
+
+compare results got from GENIE and TCGA
+```{r}
+#merge results
+compare_genie_tcga=merge(test_tcga,test,by.x="name",by.y = "name")
+compare_genie_tcga=compare_genie_tcga[,-c(2,7,8)]
+#see the common mutations in both GENIE and TCGA
+colnames(compare_genie_tcga)=c("name","expected_mutability","p_tcga","adjusted_p_tcga","type_tcga","p_genie","adjusted_p_genie","type_genie")
+head(compare_genie_tcga)
+#check if the results are same
+h=compare_genie_tcga$type_tcga==compare_genie_tcga$type_genie
+compare_genie_tcga$if_type_same=h
+#get the final table
+compare_genie_tcga
+
+```
+
+
+see the different results in GENIE and TCGA
+```{r}
+#compare q value
+diff=compare_genie_tcga[compare_genie_tcga$if_type_same=="FALSE"]
+X=c(diff$adjusted_p_genie,diff$adjusted_p_tcga)
+E=factor(rep(c("GENIE_q","TCGA_q"), each=nrow(diff)))
+Data=data.frame(X,E)
+boxplot(X~E,Data,col=c("5","6"))
+plot(diff$adjusted_p_tcga,diff$adjusted_p_genie)
+#look at the different results ordered by q value of GENIE
+diff[order(diff$adjusted_p_genie)][,c(1,4,5,7,8)]
+
+```
+
+see the same results in GENIE and TCGA
+```{r}
+#compare q value
+same=compare_genie_tcga[compare_genie_tcga$if_type_same=="TRUE"]
+X=c(same$adjusted_p_genie,same$adjusted_p_tcga)
+E=factor(rep(c("GENIE_q","TCGA_q"), each=nrow(same)))
+Data=data.frame(X,E)
+boxplot(X~E,Data,col=c("5","6"))
+#look at the same results ordered by q value of GENIE
+samedriver=same[same$type_tcga=="potential driver"]
+samedriver[order(samedriver$adjusted_p_genie)][,c(1,4,5,7,8)]
+```
+
+This chunk is used to preview the overall GENIE data before processing it. We put it at last since it takes a long time.
+```{r}
+#preview the complete GENIE firstly
+gaml=read.maf(maf=genie_data_mutations_extended)
+#summary 
+getSampleSummary(gaml)
+getGeneSummary(gaml)
+getFields(gaml)
+write.mafSummary(maf=gaml,basename = 'gaml')
+#summary plot
+plotmafSummary(maf=gaml,rmOutlier = TRUE,addStat = "median",dashboard = T,titvRaw = F)
+#Rainfall plot to display hyper mutated genomic regions
+rainfallPlot(maf=gaml,detectChangePoints = T,pointSize = 0.5)
+#Classifies SNPs into transitions and transversions by plot
+titv(maf=gaml,useSyn = F,plot=T,file = NULL)
+```
+```{r}
+#waterfall plot
+oncoplot(maf = gaml,top=20)
+#Exact tests to detect mutually exclusive, co-occuring and altered genesets.
+inter=somaticInteractions(maf=gaml,top=25,pvalue = c(0.05,0.1))
+```
+
+
+
+
